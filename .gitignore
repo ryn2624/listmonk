@@ -10,7 +10,7 @@ email-builder/.cache/
 email-builder/yarn.lock
 email-builder/dist/
 .vscode/
-
+.idea/
 config.toml
 node_modules
 listmonk

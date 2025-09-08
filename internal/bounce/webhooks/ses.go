@@ -59,6 +59,7 @@ type sesMail struct {
 		HeadersTruncated bool                `json:"headersTruncated"`
 		Destination      []string            `json:"destination"`
 		Headers          []map[string]string `json:"headers"`
+		MessageID        string              `json:"messageId"`
 	} `json:"mail"`
 }
 
@@ -66,6 +67,48 @@ type sesMail struct {
 // requests and bounce notifications.
 type SES struct {
 	certs map[string]*x509.Certificate
+}
+
+// DetectEventType verifies the SNS notification and detects the SES event type.
+// Returns one of: "Bounce", "Complaint", "Delivery". Returns an error on unknown or invalid.
+func (s *SES) DetectEventType(b []byte) (string, error) {
+	var n sesNotif
+	if err := json.Unmarshal(b, &n); err != nil {
+		return "", fmt.Errorf("error unmarshalling SES notification: %v", err)
+	}
+	if err := s.verifyNotif(n); err != nil {
+		return "", err
+	}
+	var m struct {
+		EventType string `json:"eventType"`
+		NotifType string `json:"notificationType"`
+	}
+	if err := json.Unmarshal([]byte(n.Message), &m); err != nil {
+		return "", fmt.Errorf("error unmarshalling SES message: %v", err)
+	}
+	// Prefer EventType when present; fallback to NotifType.
+	et := m.EventType
+	if et == "" {
+		et = m.NotifType
+	}
+	switch et {
+	case "Bounce", "Complaint":
+		return et, nil
+	case "Delivery":
+		return "Delivery", nil
+	default:
+		return "", errors.New("unknown SES notification type")
+	}
+}
+
+type DeliveryEvent struct {
+	Email        string
+	SubscriberUUID string
+	CampaignUUID string
+	SESMessageID string
+	Source       string
+	Meta         json.RawMessage
+	CreatedAt    time.Time
 }
 
 // NewSES returns a new SES instance.
@@ -162,7 +205,7 @@ func (s *SES) ProcessBounce(b []byte) (models.Bounce, error) {
 		}
 	}
 
-	return models.Bounce{
+ return models.Bounce{
 		Email:        strings.ToLower(m.Mail.Destination[0]),
 		CampaignUUID: campUUID,
 		Type:         typ,
@@ -170,6 +213,62 @@ func (s *SES) ProcessBounce(b []byte) (models.Bounce, error) {
 		Meta:         json.RawMessage(n.Message),
 		CreatedAt:    time.Time(m.Mail.Timestamp),
 	}, nil
+}
+
+// ProcessDelivery parses an SES Delivery notification.
+func (s *SES) ProcessDelivery(b []byte) (DeliveryEvent, error) {
+	var (
+		out DeliveryEvent
+		n   sesNotif
+	)
+	if err := json.Unmarshal(b, &n); err != nil {
+		return out, fmt.Errorf("error unmarshalling SES notification: %v", err)
+	}
+	if err := s.verifyNotif(n); err != nil {
+		return out, err
+	}
+
+	var m sesMail
+	if err := json.Unmarshal([]byte(n.Message), &m); err != nil {
+		return out, fmt.Errorf("error unmarshalling SES notification: %v", err)
+	}
+
+	if (m.EventType != "" && m.EventType != "Delivery") && (m.NotifType != "" && m.NotifType != "Delivery") {
+		return out, errors.New("notification type is not delivery")
+	}
+	if len(m.Mail.Destination) == 0 {
+		return out, errors.New("no destination e-mails found in SES notification")
+	}
+
+	campUUID := ""
+	subUUID := ""
+	if !m.Mail.HeadersTruncated {
+		for _, h := range m.Mail.Headers {
+			if key, ok := h["name"]; ok {
+				if key == models.EmailHeaderCampaignUUID {
+					if v, ok := h["value"]; ok {
+						campUUID = v
+					}
+				}
+				if key == models.EmailHeaderSubscriberUUID {
+					if v, ok := h["value"]; ok {
+						subUUID = v
+					}
+				}
+			}
+		}
+	}
+
+	out = DeliveryEvent{
+		Email:         strings.ToLower(m.Mail.Destination[0]),
+		SubscriberUUID: subUUID,
+		CampaignUUID:  campUUID,
+		SESMessageID:  m.Mail.MessageID,
+		Source:        "ses",
+		Meta:          json.RawMessage(n.Message),
+		CreatedAt:     time.Time(m.Mail.Timestamp),
+	}
+	return out, nil
 }
 
 func (s *SES) buildSignature(n sesNotif) []byte {

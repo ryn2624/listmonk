@@ -367,6 +367,10 @@ func prepareQueries(qMap goyesql.Queries, db *sqlx.DB, ko *koanf.Koanf) *models.
 		Tags:  map[string]string{"name": "get-campaign-click-counts"},
 	}
 	qMap["get-campaign-link-counts"].Query = fmt.Sprintf(qMap["get-campaign-link-counts"].Query, linkSel)
+	qMap["get-campaign-delivery-counts"] = &goyesql.Query{
+		Query: fmt.Sprintf(qMap[countQuery].Query, "campaign_deliveries"),
+		Tags:  map[string]string{"name": "get-campaign-delivery-counts"},
+	}
 
 	// Scan and prepare all queries.
 	var q models.Queries

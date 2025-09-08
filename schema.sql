@@ -415,9 +415,23 @@ CREATE MATERIALIZED VIEW mat_dashboard_charts AS
               WHERE TIMEZONE('UTC', created_at)::DATE BETWEEN (SELECT from_date FROM viewDates) AND (SELECT to_date FROM viewDates)
               GROUP by date ORDER BY date
         ) row
+    ),
+    deliveries AS (
+        SELECT JSON_AGG(ROW_TO_JSON(row))
+        FROM (
+            WITH viewDates AS (
+              SELECT TIMEZONE('UTC', created_at)::DATE AS to_date,
+                     TIMEZONE('UTC', created_at)::DATE - INTERVAL '30 DAY' AS from_date
+                     FROM campaign_deliveries ORDER BY id DESC LIMIT 1
+            )
+            SELECT COUNT(*) AS count, created_at::DATE as date FROM campaign_deliveries
+              WHERE TIMEZONE('UTC', created_at)::DATE BETWEEN (SELECT from_date FROM viewDates) AND (SELECT to_date FROM viewDates)
+              GROUP by date ORDER BY date
+        ) row
     )
     SELECT NOW() AS updated_at, JSON_BUILD_OBJECT('link_clicks', COALESCE((SELECT * FROM clicks), '[]'),
-                                  'campaign_views', COALESCE((SELECT * FROM views), '[]')
+                                  'campaign_views', COALESCE((SELECT * FROM views), '[]'),
+                                  'deliveries', COALESCE((SELECT * FROM deliveries), '[]')
                                 ) AS data;
 DROP INDEX IF EXISTS mat_dashboard_charts_idx; CREATE UNIQUE INDEX mat_dashboard_charts_idx ON mat_dashboard_charts (updated_at);
 
@@ -430,3 +444,19 @@ CREATE MATERIALIZED VIEW mat_list_subscriber_stats AS
     UNION ALL
     SELECT NOW() AS updated_at, 0 AS list_id, NULL AS status, COUNT(id) AS subscriber_count FROM subscribers;
 DROP INDEX IF EXISTS mat_list_subscriber_stats_idx; CREATE UNIQUE INDEX mat_list_subscriber_stats_idx ON mat_list_subscriber_stats (list_id, status);
+
+
+-- deliveries
+DROP TABLE IF EXISTS campaign_deliveries CASCADE;
+CREATE TABLE campaign_deliveries (
+    id               BIGSERIAL PRIMARY KEY,
+    campaign_id      INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    subscriber_id    INTEGER NOT NULL REFERENCES subscribers(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    ses_message_id   TEXT NOT NULL UNIQUE,
+    source           TEXT NOT NULL DEFAULT 'ses',
+    meta             JSONB NOT NULL DEFAULT '{}',
+    created_at       TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+DROP INDEX IF EXISTS idx_deliveries_camp_id; CREATE INDEX idx_deliveries_camp_id ON campaign_deliveries(campaign_id);
+DROP INDEX IF EXISTS idx_deliveries_sub_id; CREATE INDEX idx_deliveries_sub_id ON campaign_deliveries(subscriber_id);
+DROP INDEX IF EXISTS idx_deliveries_date; CREATE INDEX idx_deliveries_date ON campaign_deliveries((TIMEZONE('UTC', created_at)::DATE));

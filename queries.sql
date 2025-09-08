@@ -648,11 +648,17 @@ bounces AS (
     SELECT campaign_id, COUNT(campaign_id) as num FROM bounces
     WHERE campaign_id = ANY($1)
     GROUP BY campaign_id
+),
+deliveries AS (
+    SELECT campaign_id, COUNT(campaign_id) as num FROM campaign_deliveries
+    WHERE campaign_id = ANY($1)
+    GROUP BY campaign_id
 )
 SELECT id as campaign_id,
     COALESCE(v.num, 0) AS views,
     COALESCE(c.num, 0) AS clicks,
     COALESCE(b.num, 0) AS bounces,
+    COALESCE(d.num, 0) AS deliveries,
     COALESCE(l.lists, '[]') AS lists,
     COALESCE(m.media, '[]') AS media
 FROM (SELECT id FROM UNNEST($1) AS id) x
@@ -661,6 +667,7 @@ LEFT JOIN media AS m ON (m.campaign_id = id)
 LEFT JOIN views AS v ON (v.campaign_id = id)
 LEFT JOIN clicks AS c ON (c.campaign_id = id)
 LEFT JOIN bounces AS b ON (b.campaign_id = id)
+LEFT JOIN deliveries AS d ON (d.campaign_id = id)
 ORDER BY ARRAY_POSITION($1, id);
 
 -- name: get-campaign-for-preview
@@ -777,6 +784,16 @@ WITH intval AS (
 )
 SELECT campaign_id, COUNT(*) AS "count", DATE_TRUNC((SELECT * FROM intval), created_at) AS "timestamp"
     FROM bounces
+    WHERE campaign_id=ANY($1) AND created_at >= $2 AND created_at <= $3
+    GROUP BY campaign_id, "timestamp" ORDER BY "timestamp" ASC;
+
+-- name: get-campaign-delivery-counts
+WITH intval AS (
+    -- For intervals < a week, aggregate counts hourly, otherwise daily.
+    SELECT CASE WHEN (EXTRACT (EPOCH FROM ($3::TIMESTAMP - $2::TIMESTAMP)) / 86400) >= 7 THEN 'day' ELSE 'hour' END
+)
+SELECT campaign_id, COUNT(*) AS "count", DATE_TRUNC((SELECT * FROM intval), created_at) AS "timestamp"
+    FROM campaign_deliveries
     WHERE campaign_id=ANY($1) AND created_at >= $2 AND created_at <= $3
     GROUP BY campaign_id, "timestamp" ORDER BY "timestamp" ASC;
 
@@ -1329,3 +1346,15 @@ UPDATE roles SET name=$2, permissions=$3 WHERE id=$1 and parent_id IS NULL RETUR
 
 -- name: delete-role
 DELETE FROM roles WHERE id=$1;
+
+
+-- name: record-delivery
+WITH sub AS (
+    SELECT id FROM subscribers WHERE CASE WHEN $1 != '' THEN uuid = $1::UUID ELSE email = $2 END
+),
+camp AS (
+    SELECT id FROM campaigns WHERE $3 != '' AND uuid = $3::UUID
+)
+INSERT INTO campaign_deliveries (campaign_id, subscriber_id, ses_message_id, source, meta, created_at)
+SELECT (SELECT id FROM camp), (SELECT id FROM sub), $4, $5, $6, $7
+ON CONFLICT (ses_message_id) DO NOTHING;

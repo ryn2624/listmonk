@@ -113,8 +113,8 @@ func (a *App) BlocklistBouncedSubscribers(c echo.Context) error {
 	return c.JSON(http.StatusOK, okResp{true})
 }
 
-// BounceWebhook renders the HTML preview of a template.
-func (a *App) BounceWebhook(c echo.Context) error {
+// EventWebhook handles provider webhooks (bounces, complaints, deliveries).
+func (a *App) EventWebhook(c echo.Context) error {
 	// Read the request body instead of using c.Bind() to read to save the entire raw request as meta.
 	rawReq, err := io.ReadAll(c.Request().Body)
 	if err != nil {
@@ -164,12 +164,32 @@ func (a *App) BounceWebhook(c echo.Context) error {
 
 		// Bounce notification.
 		case "Notification":
-			b, err := a.bounce.SES.ProcessBounce(rawReq)
+			et, err := a.bounce.SES.DetectEventType(rawReq)
 			if err != nil {
-				a.log.Printf("error processing SES notification: %v", err)
+				a.log.Printf("error detecting SES notification type: %v", err)
 				return echo.NewHTTPError(http.StatusBadRequest, a.i18n.T("globals.messages.invalidData"))
 			}
-			bounces = append(bounces, b)
+			switch et {
+			case "Bounce", "Complaint":
+				b, err := a.bounce.SES.ProcessBounce(rawReq)
+				if err != nil {
+					a.log.Printf("error processing SES bounce/complaint: %v", err)
+					return echo.NewHTTPError(http.StatusBadRequest, a.i18n.T("globals.messages.invalidData"))
+				}
+				bounces = append(bounces, b)
+			case "Delivery":
+				d, err := a.bounce.SES.ProcessDelivery(rawReq)
+				if err != nil {
+					a.log.Printf("error processing SES delivery: %v", err)
+					return echo.NewHTTPError(http.StatusBadRequest, a.i18n.T("globals.messages.invalidData"))
+				}
+				if err := a.core.RecordDelivery(d.SubscriberUUID, d.Email, d.CampaignUUID, d.SESMessageID, d.Source, d.Meta, d.CreatedAt); err != nil {
+					a.log.Printf("error recording delivery: %v", err)
+				}
+				return c.JSON(http.StatusOK, okResp{true})
+			default:
+				return echo.NewHTTPError(http.StatusBadRequest, a.i18n.T("globals.messages.invalidData"))
+			}
 
 		default:
 			return echo.NewHTTPError(http.StatusBadRequest, a.i18n.T("globals.messages.invalidData"))
